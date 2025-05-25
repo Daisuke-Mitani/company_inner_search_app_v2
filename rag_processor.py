@@ -1,130 +1,107 @@
 """
-このファイルは、最初の画面読み込み時にのみ実行される初期化処理が記述されたファイルです。
+このファイルは、RAG（Retrieval-Augmented Generation）の処理を担当するファイルです。
+バッチ実行可能な形式で実装されています。
 """
 
 ############################################################
 # ライブラリの読み込み
 ############################################################
 import os
-import logging
-from logging.handlers import TimedRotatingFileHandler
-from uuid import uuid4
 import sys
 import unicodedata
-from dotenv import load_dotenv
-import streamlit as st
-from docx import Document
+import logging
 from langchain_community.document_loaders import WebBaseLoader
 from langchain.text_splitter import CharacterTextSplitter
 from langchain_openai import OpenAIEmbeddings
 from langchain_community.vectorstores import Chroma
-import constants as ct
-from constants import CHUNK_SIZE, CHUNK_OVERLAP, SEARCH_K
 from langchain.schema import Document
-# from rag_processor import process_rag
+import constants as ct
 
 
 ############################################################
-# 設定関連
+# 定数定義
 ############################################################
-# 「.env」ファイルで定義した環境変数の読み込み
-load_dotenv()
+# ChromaDBの保存先ディレクトリ
+CHROMA_DB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "chroma_db")
 
 
 ############################################################
 # 関数定義
 ############################################################
 
-def initialize():
+def process_rag(persist_directory=CHROMA_DB_DIR):
     """
-    画面読み込み時に実行する初期化処理
-    """
-    # 初期化データの用意
-    initialize_session_state()
-    # ログ出力用にセッションIDを生成
-    initialize_session_id()
-    # ログ出力の設定
-    initialize_logger()
-    # RAGのRetrieverを作成
-    initialize_retriever()
-
-
-def initialize_logger():
-    """
-    ログ出力の設定
-    """
-    # 指定のログフォルダが存在すれば読み込み、存在しなければ新規作成
-    os.makedirs(ct.LOG_DIR_PATH, exist_ok=True)
+    RAGの処理を実行するメイン関数
     
-    # 引数に指定した名前のロガー（ログを記録するオブジェクト）を取得
-    # 再度別の箇所で呼び出した場合、すでに同じ名前のロガーが存在していれば読み込む
-    logger = logging.getLogger(ct.LOGGER_NAME)
-
-    # すでにロガーにハンドラー（ログの出力先を制御するもの）が設定されている場合、同じログ出力が複数回行われないよう処理を中断する
-    if logger.hasHandlers():
-        return
-
-    # 1日単位でログファイルの中身をリセットし、切り替える設定
-    log_handler = TimedRotatingFileHandler(
-        os.path.join(ct.LOG_DIR_PATH, ct.LOG_FILE),
-        when="D",
-        encoding="utf8"
-    )
-    # 出力するログメッセージのフォーマット定義
-    # - 「levelname」: ログの重要度（INFO, WARNING, ERRORなど）
-    # - 「asctime」: ログのタイムスタンプ（いつ記録されたか）
-    # - 「lineno」: ログが出力されたファイルの行番号
-    # - 「funcName」: ログが出力された関数名
-    # - 「session_id」: セッションID（誰のアプリ操作か分かるように）
-    # - 「message」: ログメッセージ
-    formatter = logging.Formatter(
-        f"[%(levelname)s] %(asctime)s line %(lineno)s, in %(funcName)s, session_id={st.session_state.session_id}: %(message)s"
-    )
-
-    # 定義したフォーマッターの適用
-    log_handler.setFormatter(formatter)
-
-    # ログレベルを「INFO」に設定
-    logger.setLevel(logging.INFO)
-
-    # 作成したハンドラー（ログ出力先を制御するオブジェクト）を、
-    # ロガー（ログメッセージを実際に生成するオブジェクト）に追加してログ出力の最終設定
-    logger.addHandler(log_handler)
-
-
-def initialize_session_id():
-    """
-    セッションIDの作成
-    """
-    if "session_id" not in st.session_state:
-        # ランダムな文字列（セッションID）を、ログ出力用に作成
-        st.session_state.session_id = uuid4().hex
-
-
-def initialize_retriever():
-    """
-    画面読み込み時にRAGのRetriever（ベクターストアから検索するオブジェクト）を作成
+    Args:
+        persist_directory: ChromaDBの保存先ディレクトリパス
+    
+    Returns:
+        retriever: ベクターストアを検索するRetrieverオブジェクト
     """
     # ロガーを読み込むことで、後続の処理中に発生したエラーなどがログファイルに記録される
     logger = logging.getLogger(ct.LOGGER_NAME)
-
-    # すでにRetrieverが作成済みの場合、後続の処理を中断
-    if "retriever" in st.session_state:
-        return
     
-    # RAG処理を実行してRetrieverを取得
-    # st.session_state.retriever = process_rag()
+    # ChromaDBの保存先ディレクトリを作成
+    os.makedirs(persist_directory, exist_ok=True)
+    logger.info(f"ChromaDBの保存先: {persist_directory}")
+    
+    # RAGの参照先となるデータソースの読み込み
+    docs_all = load_data_sources()
+    logger.info(f"読み込んだドキュメント数: {len(docs_all)}")
 
+    # OSがWindowsの場合、Unicode正規化と、cp932（Windows用の文字コード）で表現できない文字を除去
+    for doc in docs_all:
+        doc.page_content = adjust_string(doc.page_content)
+        for key in doc.metadata:
+            doc.metadata[key] = adjust_string(doc.metadata[key])
+    
+    # 埋め込みモデルの用意
+    embeddings = OpenAIEmbeddings()
+    
+    # チャンク分割用のオブジェクトを作成
+    text_splitter = CharacterTextSplitter(
+        chunk_size=ct.CHUNK_SIZE,
+        chunk_overlap=ct.CHUNK_OVERLAP,
+        separator="\n"
+    )
 
-def initialize_session_state():
-    """
-    初期化データの用意
-    """
-    if "messages" not in st.session_state:
-        # 「表示用」の会話ログを順次格納するリストを用意
-        st.session_state.messages = []
-        # 「LLMとのやりとり用」の会話ログを順次格納するリストを用意
-        st.session_state.chat_history = []
+    # チャンク分割を実施
+    splitted_docs = text_splitter.split_documents(docs_all)
+    logger.info(f"チャンク分割後のドキュメント数: {len(splitted_docs)}")
+
+    try:
+        # 既存のベクターストアを削除（存在する場合）
+        if os.path.exists(persist_directory):
+            import shutil
+            shutil.rmtree(persist_directory)
+            os.makedirs(persist_directory, exist_ok=True)
+            logger.info("既存のベクターストアを削除しました。")
+
+        # ベクターストアの作成（永続化設定を追加）
+        db = Chroma.from_documents(
+            documents=splitted_docs,
+            embedding=embeddings,
+            persist_directory=persist_directory
+        )
+        
+        # ベクターストアを永続化
+        db.persist()
+        logger.info("ベクターストアを永続化しました。")
+
+        # 保存されたファイルの確認
+        if os.path.exists(persist_directory):
+            files = os.listdir(persist_directory)
+            logger.info(f"保存されたファイル: {files}")
+        else:
+            logger.error("ベクターストアの保存に失敗しました。")
+
+        # ベクターストアを検索するRetrieverの作成
+        return db.as_retriever(search_kwargs={"k": ct.SEARCH_K})
+    
+    except Exception as e:
+        logger.error(f"ベクターストアの作成中にエラーが発生しました: {e}")
+        raise
 
 
 def load_data_sources():
@@ -228,3 +205,30 @@ def adjust_string(s):
     
     # OSがWindows以外の場合はそのまま返す
     return s
+
+
+if __name__ == "__main__":
+    # ログ出力の設定
+    os.makedirs(ct.LOG_DIR_PATH, exist_ok=True)
+    logger = logging.getLogger(ct.LOGGER_NAME)
+    logger.setLevel(logging.INFO)
+    
+    # ログハンドラーの設定
+    log_handler = logging.FileHandler(
+        os.path.join(ct.LOG_DIR_PATH, "rag_processor.log"),
+        encoding="utf8"
+    )
+    formatter = logging.Formatter(
+        f"[%(levelname)s] %(asctime)s line %(lineno)s, in %(funcName)s: %(message)s"
+    )
+    log_handler.setFormatter(formatter)
+    logger.addHandler(log_handler)
+    
+    try:
+        # RAG処理の実行
+        retriever = process_rag()
+        logger.info("RAG処理が正常に完了しました。")
+    except Exception as e:
+        logger.error(f"RAG処理中にエラーが発生しました: {e}")
+        raise
+    
