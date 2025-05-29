@@ -21,7 +21,7 @@ from langchain_community.vectorstores import Chroma
 import constants as ct
 from constants import CHUNK_SIZE, CHUNK_OVERLAP, SEARCH_K
 from langchain.schema import Document
-# from rag_processor import process_rag
+from rag_processor import process_rag
 
 
 ############################################################
@@ -113,7 +113,7 @@ def initialize_retriever():
         return
     
     # RAG処理を実行してRetrieverを取得
-    # st.session_state.retriever = process_rag()
+    st.session_state.retriever = process_rag()
 
 
 def initialize_session_state():
